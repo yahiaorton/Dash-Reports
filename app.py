@@ -1,200 +1,126 @@
 import pandas as pd
-from utilities.query_utils import *
-from utilities.table_utils import *
-import datetime as dt
+import openpyxl
+from urllib.parse import parse_qs, urlparse
+from datetime import datetime
 
 import dash
-from dash import Dash, html, dcc, Input, Output, State
-from dash.dash_table import DataTable
+from dash import html, dcc, Input, Output, State, callback, no_update
 import dash_bootstrap_components as dbc
-from dash.exceptions import PreventUpdate
+import dash_ag_grid as dag
 
-from ui.sidebar_inputs import sidebar_inputs
+from utils.query_utils import *
+from utils.table_utils import *
+from utils.aggrid_utils import *
 
-DEFAULT_STR_ID = 92
-DEFAULT_ORG_IDS = None
+from components.components import get_aggrid_component
 
-app = Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP, dbc.icons.BOOTSTRAP])
+DF = None
+DF_CURRENT = None
+TABLE = Tables.Military
 
-sidebar = html.Div(
-    className="d-flex flex-column flex-shrink-0 p-3 bg-body-tertiary",
-    style={"width": "280px", "height": "100vh"},
+app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP, dbc.icons.BOOTSTRAP])
+app.layout = dbc.Container(
     children=[
-        # Brand
-        dbc.Row(
-            className="align-items-center justify-content-between",
+        dbc.Card(
             children=[
-                dbc.Col([html.Span("Filters", className="fs-4")]),
-                dbc.Col([dbc.Button("Generate", id="generate-button", color="primary", className="ms-5", n_clicks=0, type="button")]),
-            ],
-        ),
-
-        html.Hr(),
-
-        # Input Data Form (pills)
-        dbc.Nav(
-            [
-                dbc.Form(sidebar_inputs),
-            ],
-            vertical=True,
-            pills=True,
-            className="mb-auto overflow-y-auto",
-        ),
-
-        html.Hr(),
-    ],
-)
-
-def build_report_tab(report_title: str):
-    return dbc.Card(
-        dbc.CardBody(
-            [
-                dbc.Row(
+                dbc.CardBody(
                     children=[
-                        dbc.Col(
+                        dbc.Row(
                             children=[
-                                html.H2(f"{report_title} Data Report"),
-                                html.P("Comprehensive personnel data and organizational information", className="mb-4 text-muted"),
-                            ],
-                            width="auto",
-                        ),
-                        dbc.Col(
-                            children=[
-                                dbc.Button(
-                                    children=[html.I(className="bi bi-download me-2"), f"Download {report_title} Report"], 
-                                    id=f"{report_title.lower()}-download-button", 
-                                    outline=True,
-                                    color="dark", 
-                                    className="ms-5", 
-                                    n_clicks=0, 
-                                    type="button"
+                                dbc.Col(dbc.Input(id="search_field", placeholder="🔍 Search...", type="text", className="form-control", debounce=True), width="auto"),
+                                dbc.Col(
+                                    dbc.Row(
+                                        children=[
+                                            dbc.Col(dbc.Button(children=[html.I(className="bi bi-funnel-fill"), " Filter"], id="filter-button", color="secondary", className="ml-2"), width="auto"),
+                                            dbc.Col(dbc.Button("Export", id="export-button", color="dark", outline=True, className="ml-2"), width="auto"),
+                                        ]
+                                    ),
+                                    width="auto",
                                 ),
-                                dcc.Download(id=f"{report_title.lower()}-download"),
                             ],
-                            width="auto",
+                            justify="between",
+                            className="mb-3",
                         ),
-                    ],
-                    className="justify-content-between",
-                ),
-                dbc.Spinner(
-                    children=html.Div(
-                        className="table-modern",
-                        children=DataTable(
-                            id=f"{report_title.lower()}-data-table", 
-                            columns=[], 
-                            data=[], 
-                            style_table={"overflowX": "auto"},
-                            style_cell={"textAlign": "center"},
-                            style_header={"backgroundColor": "lightgrey", "fontWeight": "bold"},
-                            sort_action="native",
-                            sort_mode="multi",
-                            page_action="native",
-                            page_size=10,
-                            style_as_list_view=True
+                        dbc.Row(
+                            children=get_aggrid_component(),
+                            className="overflow-auto",
                         )
-                    ),
-                    color="primary",
+                    ],
                 ),
-                
-            ]
+            ],
         ),
-        className="border-0",
-    )
-
-# Optional: a main content area to the right
-content = html.Div(
-    className="p-4 overflow-auto",
-    children=[
-        dbc.Tabs([
-            dbc.Tab(build_report_tab("Military"), label="Military Tab", tab_id="Military Tab"),
-            dbc.Tab(build_report_tab("Custodies"), label="Custodies Tab", tab_id="Custodies Tab"),
-        ],
-        active_tab="Military Tab",
-        id="tabs",
-        ),
+        dcc.Location(id="url", refresh=False),
+        dcc.Store(id="intermediate-store"),
+        dcc.Download(id="download-dataframe-xlsx"),
     ],
+    fluid=True,
+    className="mt-3",
 )
 
-app.layout = html.Div([sidebar, content], className="d-flex")
-
-@app.callback(
-    Output("military-data-table", "columns"),
-    Output("military-data-table", "data"),
-    Output("custodies-data-table", "columns"),
-    Output("custodies-data-table", "data"),
-    Input("tabs", "active_tab"),
-    Input("generate-button", "n_clicks"),
-    State("company_ID_input", "value"),
-    State("person_inst_IDs_input", "value"),
-    State("company_type_input", "value"),
-    State("business_entity_input", "value"),
-    State("with_child_input", "value"),
-    State("military_status_input", "value"),
-    State("employee_status_input", "value"),
-    State("financial_company_IDs_input", "value"),
-    State("custody_IDs_input", "value"),
+@callback(
+    Output("report-table", "columnDefs"),
+    Output("intermediate-store", "data"),
+    Input("url", "search"),
 )
-def switch_tab(at, n_clicks, company_id, person_ids, company_type, business_entity_id, with_child, military_status, employee_status, financial_company_ids, custody_ids):
-    if at == "Military Tab":    
-        query = build_millitary_query(
-            DEFAULT_STR_ID,
-            DEFAULT_ORG_IDS,
-            company_id,
-            person_ids,
-            company_type,
-            business_entity_id,
-            with_child,
-            military_status, 
-            financial_company_ids
-        )
-    else:
-        query = build_custodies_query(
-            DEFAULT_STR_ID,
-            DEFAULT_ORG_IDS,
-            company_id,
-            person_ids,
-            company_type,
-            business_entity_id,
-            with_child,
-            employee_status,
-            financial_company_ids,
-            custody_ids
-        )
+def build_column_defs(search):
+    # Extract query params
+    query_params = parse_qs(urlparse(search).query)
+
+    params_dict = {key: value[0] for key, value in query_params.items()}
+
+    df = get_df_from_query(build_query(TABLE, params_dict))
+
+    global DF
+    DF = df
+
+    return make_column_defs(df), {"value": "Done"}
+
+@callback(
+    Output("report-table", "getRowsResponse"),
+    Input("report-table", "getRowsRequest"),
+    Input("search_field", "value"),
+    Input("intermediate-store", "data"),
+)
+def infinite_scroll(request, search_value, _store_data):
+
+    global DF
+    global DF_CURRENT
     
-    df = get_df_from_query(query)
+    if not isinstance(DF, pd.DataFrame):
+        return no_update
+    dff = DF.copy()
+
+    if search_value is not None:
+        dff = apply_global_search(dff, search_value)
+
+    if request:
+        if request["filterModel"]:
+            dff = apply_filters(request, dff)
+
+        if request["sortModel"]:
+            dff = apply_sort(request, dff)
+
+        DF_CURRENT = dff
+
+        lines = len(dff.index)
+        if lines == 0:
+            lines = 1
+
+        partial = dff.iloc[request["startRow"]: request["endRow"]]
+        return {"rowData": partial.to_dict("records"), "rowCount": lines}
     
-    columns = infer_dash_columns(df)
-    data = df.to_dict("records")
-
-    return columns, data, columns, data
-
-@dash.callback(
-    Output("military-download", "data"),
-    Input("military-download-button", "n_clicks"),
-    State("military-data-table", "derived_virtual_data"),  # current filtered/sorted view
-    prevent_initial_call=True,
+@callback(
+    Output("download-dataframe-xlsx", "data"),
+    Input("export-button", "n_clicks"),
+    prevent_initial_call=True
 )
-def download_military_data(n, rows):
-    if not rows:
-        raise PreventUpdate
-    df = pd.DataFrame(rows)
-    fname = f"military_report_{dt.datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
-    return dcc.send_data_frame(df.to_excel, fname, sheet_name="Report", index=False)
+def export(n_clicks):
+    global DF_CURRENT
 
-@dash.callback(
-    Output("custodies-download", "data"),
-    Input("custodies-download-button", "n_clicks"),
-    State("custodies-data-table", "derived_virtual_data"),
-    prevent_initial_call=True,
-)
-def download_custodies_data(n, rows):
-    if not rows:
-        raise PreventUpdate
-    df = pd.DataFrame(rows)
-    fname = f"custodies_report_{dt.datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
-    return dcc.send_data_frame(df.to_excel, fname, sheet_name="Report", index=False)
-
+    if not isinstance(DF_CURRENT, pd.DataFrame):
+        return no_update
+    
+    return dcc.send_data_frame(DF_CURRENT.to_excel, f"{TABLE}_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.xlsx")
 
 if __name__ == '__main__':
-
-    app.run(debug=False, host="0.0.0.0", port=8050)
+    app.run(debug=True)

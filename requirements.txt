@@ -1,6 +1,9 @@
-pyodbc
-python-dotenv
-pandas
 dash
 dash_bootstrap_components
+dash_ag_grid
+python-dotenv
+pyodbc
+pandas
+numpy
 openpyxl
+numpy
