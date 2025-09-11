@@ -123,4 +123,4 @@ def export(n_clicks):
     return dcc.send_data_frame(DF_CURRENT.to_excel, f"{TABLE}_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.xlsx")
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=False, host="0.0.0.0", port=8050)
